@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from munch import Munch
 from inspect import isfunction
+import contextlib
 
 operators = '|'.join(['arccos', 'arcsin', 'arctan', 'arg', 'cos', 'cosh', 'cot', 'coth', 'csc', 'deg', 'det', 'dim', 'exp', 'gcd', 'hom', 'inf',
                       'injlim', 'ker', 'lg', 'lim', 'liminf', 'limsup', 'ln', 'log', 'max', 'min', 'Pr', 'projlim', 'sec', 'sin', 'sinh', 'sup', 'tan', 'tanh'])
@@ -57,9 +58,6 @@ def parse_args(args, **kwargs):
     args.min_dimensions = [args.get('min_width', 32), args.get('min_height', 32)]
     if 'decoder_args' not in args or args.decoder_args is None:
         args.decoder_args = {}
-    if 'model_path' in args:
-        args.out_path = os.path.join(args.model_path, args.name)
-        os.makedirs(args.out_path, exist_ok=True)
     return args
 
 
@@ -80,27 +78,30 @@ def pad(img: Image, divable=32):
     Returns:
         PIL.Image
     """
+    threshold = 128
     data = np.array(img.convert('LA'))
-    data = (data-data.min())/(data.max()-data.min())*255
-    if data[..., 0].mean() > 128:
-        gray = 255*(data[..., 0] < 128).astype(np.uint8)  # To invert the text to white
+    if data[..., -1].var() == 0:
+        data = (data[..., 0]).astype(np.uint8)
     else:
-        gray = 255*(data[..., 0] > 128).astype(np.uint8)
-        data[..., 0] = 255-data[..., 0]
+        data = (255-data[..., -1]).astype(np.uint8)
+    data = (data-data.min())/(data.max()-data.min())*255
+    if data.mean() > threshold:
+        # To invert the text to white
+        gray = 255*(data < threshold).astype(np.uint8)
+    else:
+        gray = 255*(data > threshold).astype(np.uint8)
+        data = 255-data
 
     coords = cv2.findNonZero(gray)  # Find all non-zero points (text)
     a, b, w, h = cv2.boundingRect(coords)  # Find minimum spanning bounding box
     rect = data[b:b+h, a:a+w]
-    if rect[..., -1].var() == 0:
-        im = Image.fromarray((rect[..., 0]).astype(np.uint8)).convert('L')
-    else:
-        im = Image.fromarray((255-rect[..., -1]).astype(np.uint8)).convert('L')
+    im = Image.fromarray(rect).convert('L')
     dims = []
     for x in [w, h]:
         div, mod = divmod(x, divable)
         dims.append(divable*(div + (1 if mod > 0 else 0)))
     padded = Image.new('L', dims, 255)
-    padded.paste(im, im.getbbox())
+    padded.paste(im, (0, 0, im.size[0], im.size[1]))
     return padded
 
 
@@ -152,3 +153,15 @@ def get_scheduler(scheduler):
 
 def num_model_params(model):
     return sum([p.numel() for p in model.parameters()])
+
+
+@contextlib.contextmanager
+def in_model_path():
+    import pix2tex
+    model_path = os.path.join(os.path.dirname(pix2tex.__file__), 'model')
+    saved = os.getcwd()
+    os.chdir(model_path)
+    try:
+        yield
+    finally:
+        os.chdir(saved)

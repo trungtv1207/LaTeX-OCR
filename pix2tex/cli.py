@@ -1,5 +1,4 @@
-from dataset.dataset import test_transform
-import cv2
+from pix2tex.dataset.dataset import test_transform
 import pandas.io.clipboard as clipboard
 from PIL import ImageGrab
 from PIL import Image
@@ -12,15 +11,15 @@ import re
 
 import numpy as np
 import torch
-from torchvision import transforms
 from munch import Munch
 from transformers import PreTrainedTokenizerFast
 from timm.models.resnetv2 import ResNetV2
 from timm.models.layers import StdConv2dSame
 
-from dataset.latex2png import tex2pil
-from models import get_model
-from utils import *
+from pix2tex.dataset.latex2png import tex2pil
+from pix2tex.models import get_model
+from pix2tex.utils import *
+from pix2tex.model.checkpoints.get_latest_checkpoint import download_checkpoints
 
 last_pic = None
 
@@ -32,13 +31,16 @@ def minmax_size(img, max_dimensions=None, min_dimensions=None):
             size = np.array(img.size)//max(ratios)
             img = img.resize(size.astype(int), Image.BILINEAR)
     if min_dimensions is not None:
-        if any([s < min_dimensions[i] for i, s in enumerate(img.size)]):
-            padded_im = Image.new('L', min_dimensions, 255)
+        # hypothesis: there is a dim in img smaller than min_dimensions, and return a proper dim >= min_dimensions
+        padded_size = [max(img_dim, min_dim) for img_dim, min_dim in zip(img.size, min_dimensions)]
+        if padded_size != list(img.size):  # assert hypothesis
+            padded_im = Image.new('L', padded_size, 255)
             padded_im.paste(img, img.getbbox())
             img = padded_im
     return img
 
 
+@in_model_path()
 def initialize(arguments=None):
     if arguments is None:
         arguments = Munch({'config': 'settings/config.yaml', 'checkpoint': 'checkpoints/weights.pth', 'no_cuda': True, 'no_resize': False})
@@ -50,7 +52,8 @@ def initialize(arguments=None):
     args.update(**vars(arguments))
     args.wandb = False
     args.device = 'cuda' if torch.cuda.is_available() and not args.no_cuda else 'cpu'
-
+    if not os.path.exists(args.checkpoint):
+        download_checkpoints()
     model = get_model(args)
     model.load_state_dict(torch.load(args.checkpoint, map_location=args.device))
 
@@ -65,6 +68,7 @@ def initialize(arguments=None):
     return args, model, image_resizer, tokenizer
 
 
+@in_model_path()
 def call_model(args, model, image_resizer, tokenizer, img=None):
     global last_pic
     encoder, decoder = model.encoder, model.decoder
@@ -82,9 +86,10 @@ def call_model(args, model, image_resizer, tokenizer, img=None):
     if image_resizer is not None and not args.no_resize:
         with torch.no_grad():
             input_image = img.convert('RGB').copy()
-            r, w = 1, input_image.size[0]
+            r, w, h = 1, input_image.size[0], input_image.size[1]
             for _ in range(10):
-                img = pad(minmax_size(input_image.resize((w, int(input_image.size[1]*r)), Image.BILINEAR if r > 1 else Image.LANCZOS), args.max_dimensions, args.min_dimensions))
+                h = int(h * r)  # height to resize
+                img = pad(minmax_size(input_image.resize((w, h), Image.BILINEAR if r > 1 else Image.LANCZOS), args.max_dimensions, args.min_dimensions))
                 t = test_transform(image=np.array(img.convert('RGB')))['image'][:1].unsqueeze(0)
                 w = (image_resizer(t.to(args.device)).argmax(-1).item()+1)*32
                 logging.info(r, img.size, (w, int(input_image.size[1]*r)))
@@ -127,8 +132,8 @@ def output_prediction(pred, args):
             webbrowser.open(url)
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Use model', add_help=False)
+def main():
+    parser = argparse.ArgumentParser(description='Use model')
     parser.add_argument('-t', '--temperature', type=float, default=.333, help='Softmax sampling frequency')
     parser.add_argument('-c', '--config', type=str, default='settings/config.yaml')
     parser.add_argument('-m', '--checkpoint', type=str, default='checkpoints/weights.pth')
@@ -138,66 +143,66 @@ if __name__ == "__main__":
     parser.add_argument('--no-cuda', action='store_true', help='Compute on CPU')
     parser.add_argument('--no-resize', action='store_true', help='Resize the image beforehand')
     arguments = parser.parse_args()
-    latexocr_path = os.path.dirname(sys.argv[0])
-    if latexocr_path != '':
-        sys.path.insert(0, latexocr_path)
-        os.chdir(latexocr_path)
+    with in_model_path():
+        args, *objs = initialize(arguments)
+        while True:
+            instructions = input('Predict LaTeX code for image ("?"/"h" for help). ')
+            possible_file = instructions.strip()
+            ins = possible_file.lower()
+            if ins == 'x':
+                break
+            elif ins in ['?', 'h', 'help']:
+                print('''pix2tex help:
 
-    args, *objs = initialize(arguments)
-    while True:
-        instructions = input('Predict LaTeX code for image ("?"/"h" for help). ')
-        possible_file = instructions.strip()
-        ins = possible_file.lower()
-        if ins == 'x':
-            break
-        elif ins in ['?', 'h', 'help']:
-            print('''pix2tex help:
+    Usage:
+        On Windows and macOS you can copy the image into memory and just press ENTER to get a prediction.
+        Alternatively you can paste the image file path here and submit.
 
-Usage:
-    On Windows and macOS you can copy the image into memory and just press ENTER to get a prediction.
-    Alternatively you can paste the image file path here and submit.
+        You might get a different prediction every time you submit the same image. If the result you got was close you
+        can just predict the same image by pressing ENTER again. If that still does not work you can change the temperature
+        or you have to take another picture with another resolution (e.g. zoom out and take a screenshot with lower resolution). 
 
-    You might get a different prediction every time you submit the same image. If the result you got was close you
-    can just predict the same image by pressing ENTER again. If that still does not work you can change the temperature
-    or you have to take another picture with another resolution (e.g. zoom out and take a screenshot with lower resolution). 
+        Press "x" to close the program.
+        You can interrupt the model if it takes too long by pressing Ctrl+C.
 
-    Press "x" to close the program.
-    You can interrupt the model if it takes too long by pressing Ctrl+C.
+    Visualization:
+        You can either render the code into a png using XeLaTeX (see README) to get an image file back.
+        This is slow and requires a working installation of XeLaTeX. To activate type 'show' or set the flag --show
+        Alternatively you can render the expression in the browser using katex.org. Type 'katex' or set --katex
 
-Visualization:
-    You can either render the code into a png using XeLaTeX (see README) to get an image file back.
-    This is slow and requires a working installation of XeLaTeX. To activate type 'show' or set the flag --show
-    Alternatively you can render the expression in the browser using katex.org. Type 'katex' or set --katex
-
-Settings:
-    to toggle one of these settings: 'show', 'katex', 'no_resize' just type it into the console
-    Change the temperature (default=0.333) type: "t=0.XX" to set a new temperature.
-                ''')
-            continue
-        elif ins in ['show', 'katex', 'no_resize']:
-            setattr(args, ins, not getattr(args, ins, False))
-            print('set %s to %s' % (ins, getattr(args, ins)))
-            continue
-        elif os.path.isfile(os.path.realpath(possible_file)):
-            args.file = possible_file
-        else:
-            t = re.match(r't=([\.\d]+)', ins)
-            if t is not None:
-                t = t.groups()[0]
-                args.temperature = float(t)+1e-8
-                print('new temperature: T=%.3f' % args.temperature)
+    Settings:
+        to toggle one of these settings: 'show', 'katex', 'no_resize' just type it into the console
+        Change the temperature (default=0.333) type: "t=0.XX" to set a new temperature.
+                    ''')
                 continue
-        try:
-            img = None
-            if args.file:
-                img = Image.open(args.file)
+            elif ins in ['show', 'katex', 'no_resize']:
+                setattr(args, ins, not getattr(args, ins, False))
+                print('set %s to %s' % (ins, getattr(args, ins)))
+                continue
+            elif os.path.isfile(os.path.realpath(possible_file)):
+                args.file = possible_file
             else:
-                try:
-                    img = ImageGrab.grabclipboard()
-                except:
-                    pass
-            pred = call_model(args, *objs, img=img)
-            output_prediction(pred, args)
-        except KeyboardInterrupt:
-            pass
-        args.file = None
+                t = re.match(r't=([\.\d]+)', ins)
+                if t is not None:
+                    t = t.groups()[0]
+                    args.temperature = float(t)+1e-8
+                    print('new temperature: T=%.3f' % args.temperature)
+                    continue
+            try:
+                img = None
+                if args.file:
+                    img = Image.open(args.file)
+                else:
+                    try:
+                        img = ImageGrab.grabclipboard()
+                    except:
+                        pass
+                pred = call_model(args, *objs, img=img)
+                output_prediction(pred, args)
+            except KeyboardInterrupt:
+                pass
+            args.file = None
+
+
+if __name__ == "__main__":
+    main()

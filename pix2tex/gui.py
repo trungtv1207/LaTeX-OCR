@@ -1,25 +1,29 @@
 import sys
 import os
 import argparse
+import tempfile
 from PyQt5 import QtCore, QtGui
 from PyQt5.QtCore import QObject, Qt, pyqtSlot, pyqtSignal, QThread
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QMainWindow, QApplication, QMessageBox, QVBoxLayout, QWidget, QShortcut,\
     QPushButton, QTextEdit, QLineEdit, QFormLayout, QHBoxLayout, QCheckBox, QSpinBox, QDoubleSpinBox
-from resources import resources
+from pix2tex.resources import resources
 from pynput.mouse import Controller
 
-from PIL import ImageGrab
+from PIL import ImageGrab, Image
 import numpy as np
 from screeninfo import get_monitors
-import pix2tex
+from pix2tex import cli
+from pix2tex.utils import in_model_path
 
 QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
 QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
 
 
 class App(QMainWindow):
+    isProcessing = False
+
     def __init__(self, args=None):
         super().__init__()
         self.args = args
@@ -30,7 +34,7 @@ class App(QMainWindow):
         self.show()
 
     def initModel(self):
-        args, *objs = pix2tex.initialize(self.args)
+        args, *objs = cli.initialize(self.args)
         self.args = args
         self.objs = objs
 
@@ -87,19 +91,51 @@ class App(QMainWindow):
         settings.addRow('Temperature:', self.tempField)
         lay.addLayout(settings)
 
+    def toggleProcessing(self, value=None):
+        if value is None:
+            self.isProcessing = not self.isProcessing
+        else:
+            self.isProcessing = value
+        if self.isProcessing:
+            text = 'Interrupt'
+            func = self.interrupt
+        else:
+            text = 'Snip [Alt+S]'
+            func = self.onClick
+        self.shortcut.setEnabled(not self.isProcessing)
+        self.snipButton.setText(text)
+        self.snipButton.clicked.disconnect()
+        self.snipButton.clicked.connect(func)
+        self.displayPrediction()
+
     @pyqtSlot()
     def onClick(self):
         self.close()
-        self.snipWidget.snip()
+        if self.args.gnome:
+            self.snip_using_gnome_screenshot()
+        else:
+            self.snipWidget.snip()
+
+    @pyqtSlot()
+    def interrupt(self):
+        if hasattr(self, 'thread'):
+            self.thread.terminate()
+            self.thread.wait()
+            self.toggleProcessing(False)
+
+    def snip_using_gnome_screenshot(self):
+        try:
+            with tempfile.NamedTemporaryFile() as tmp:
+                os.system(f"gnome-screenshot --area --file={tmp.name}")
+                # Use `tmp.name` instead of `tmp.file` due to compatability issues between Pillow and tempfile
+                self.returnSnip(Image.open(tmp.name))
+        except:
+            print(f"Failed to load saved screenshot! Did you cancel the screenshot?")
+            print("If you don't have gnome-screenshot installed, please install it.")
+            self.returnSnip()
 
     def returnSnip(self, img=None):
-        # Show processing icon
-        pageSource = """<center>
-        <img src="qrc:/icons/processing-icon-anim.svg" width="50", height="50">
-        </center>"""
-        self.webView.setHtml(pageSource)
-
-        self.snipButton.setEnabled(False)
+        self.toggleProcessing(True)
         self.retryButton.setEnabled(False)
 
         self.show()
@@ -113,12 +149,10 @@ class App(QMainWindow):
         self.thread = ModelThread(img=img, args=self.args, objs=self.objs)
         self.thread.finished.connect(self.returnPrediction)
         self.thread.finished.connect(self.thread.deleteLater)
-
         self.thread.start()
 
     def returnPrediction(self, result):
-        self.snipButton.setEnabled(True)
-
+        self.toggleProcessing(False)
         success, prediction = result["success"], result["prediction"]
 
         if success:
@@ -132,27 +166,32 @@ class App(QMainWindow):
             msg.exec_()
 
     def displayPrediction(self, prediction=None):
-        if prediction is not None:
-            self.textbox.setText("${equation}$".format(equation=prediction))
+        if self.isProcessing:
+            pageSource = """<center>
+            <img src="qrc:/icons/processing-icon-anim.svg" width="50", height="50">
+            </center>"""
         else:
-            prediction = self.textbox.toPlainText().strip('$')
-        pageSource = """
-        <html>
-        <head><script id="MathJax-script" src="qrc:MathJax.js"></script>
-        <script>
-        MathJax.Hub.Config({messageStyle: 'none',tex2jax: {preview: 'none'}});
-        MathJax.Hub.Queue(
-            function () {
-                document.getElementById("equation").style.visibility = "";
-            }
-            );
-        </script>
-        </head> """ + """
-        <body>
-        <div id="equation" style="font-size:1em; visibility:hidden">$${equation}$$</div>
-        </body>
-        </html>
-            """.format(equation=prediction)
+            if prediction is not None:
+                self.textbox.setText("${equation}$".format(equation=prediction))
+            else:
+                prediction = self.textbox.toPlainText().strip('$')
+            pageSource = """
+            <html>
+            <head><script id="MathJax-script" src="qrc:MathJax.js"></script>
+            <script>
+            MathJax.Hub.Config({messageStyle: 'none',tex2jax: {preview: 'none'}});
+            MathJax.Hub.Queue(
+                function () {
+                    document.getElementById("equation").style.visibility = "";
+                }
+                );
+            </script>
+            </head> """ + """
+            <body>
+            <div id="equation" style="font-size:1em; visibility:hidden">$${equation}$$</div>
+            </body>
+            </html>
+                """.format(equation=prediction)
         self.webView.setHtml(pageSource)
 
 
@@ -167,12 +206,13 @@ class ModelThread(QThread):
 
     def run(self):
         try:
-            prediction = pix2tex.call_model(self.args, *self.objs, img=self.img)
+            prediction = cli.call_model(self.args, *self.objs, img=self.img)
             # replace <, > with \lt, \gt so it won't be interpreted as html code
             prediction = prediction.replace('<', '\\lt ').replace('>', '\\gt ')
             self.finished.emit({"success": True, "prediction": prediction})
         except Exception as e:
-            print(e)
+            import traceback
+            traceback.print_exc()
             self.finished.emit({"success": False, "prediction": None})
 
 
@@ -204,16 +244,14 @@ class SnipWidget(QMainWindow):
     def paintEvent(self, event):
         if self.isSnipping:
             brushColor = (0, 180, 255, 100)
-            lw = 3
             opacity = 0.3
         else:
             brushColor = (255, 255, 255, 0)
-            lw = 3
             opacity = 0
 
         self.setWindowOpacity(opacity)
         qp = QtGui.QPainter(self)
-        qp.setPen(QtGui.QPen(QtGui.QColor('black'), lw))
+        qp.setPen(QtGui.QPen(QtGui.QColor('black'), 2))
         qp.setBrush(QtGui.QColor(*brushColor))
         qp.drawRect(QtCore.QRect(self.begin, self.end))
 
@@ -241,15 +279,23 @@ class SnipWidget(QMainWindow):
 
         startPos = self.startPos
         endPos = self.mouse.position
+        # account for retina display. #TODO how to check if device is actually using retina display
+        factor = 2 if sys.platform == "darwin" else 1
 
-        x1 = min(startPos[0], endPos[0])
-        y1 = min(startPos[1], endPos[1])
-        x2 = max(startPos[0], endPos[0])
-        y2 = max(startPos[1], endPos[1])
+        x1 = int(min(startPos[0], endPos[0])*factor)
+        y1 = int(min(startPos[1], endPos[1])*factor)
+        x2 = int(max(startPos[0], endPos[0])*factor)
+        y2 = int(max(startPos[1], endPos[1])*factor)
 
         self.repaint()
         QApplication.processEvents()
-        img = ImageGrab.grab(bbox=(x1, y1, x2, y2), all_screens=True)
+        try:
+            img = ImageGrab.grab(bbox=(x1, y1, x2, y2), all_screens=True)
+        except Exception as e:
+            if sys.platform == "darwin":
+                img = ImageGrab.grab(bbox=(x1//factor, y1//factor, x2//factor, y2//factor), all_screens=True)
+            else:
+                raise e
         QApplication.processEvents()
 
         self.close()
@@ -258,18 +304,20 @@ class SnipWidget(QMainWindow):
         self.parent.returnSnip(img)
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser(description='GUI arguments')
     parser.add_argument('-t', '--temperature', type=float, default=.2, help='Softmax sampling frequency')
     parser.add_argument('-c', '--config', type=str, default='settings/config.yaml', help='path to config file')
     parser.add_argument('-m', '--checkpoint', type=str, default='checkpoints/weights.pth', help='path to weights file')
     parser.add_argument('--no-cuda', action='store_true', help='Compute on CPU')
     parser.add_argument('--no-resize', action='store_true', help='Resize the image beforehand')
+    parser.add_argument('--gnome', action='store_true', help='Use gnome-screenshot to capture screenshot')
     arguments = parser.parse_args()
-    latexocr_path = os.path.dirname(sys.argv[0])
-    if latexocr_path != '':
-        sys.path.insert(0, latexocr_path)
-        os.chdir(latexocr_path)
-    app = QApplication(sys.argv)
-    ex = App(arguments)
-    sys.exit(app.exec_())
+    with in_model_path():
+        app = QApplication(sys.argv)
+        ex = App(arguments)
+        sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
