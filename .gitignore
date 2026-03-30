@@ -14,7 +14,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# lib/
 lib64/
 parts/
 sdist/
@@ -138,3 +138,5 @@ pix2tex/model/checkpoints/**
 !**/.gitkeep
 .vscode
 .DS_Store
+test/*
+

@@ -15,9 +15,19 @@ from pix2tex.utils import *
 from pix2tex.dataset.dataset import *
 from munch import Munch
 import argparse
+from typing import Tuple
 
 
-def prepare_data(dataloader):
+def prepare_data(dataloader: Im2LatexDataset) -> Tuple[torch.tensor, torch.tensor]:
+    """Use the data from a dataloader to train a image resizer model. 
+    Randomly resize the images of one batch in the dataset and return the original resolution along side with the new images.
+
+    Args:
+        dataloader (Im2LatexDataset): The dataset in question
+
+    Returns:
+        Tuple[torch.tensor, torch.tensor]: One batch of resized images and labels
+    """
     _, ims = dataloader.pairs[dataloader.i-1].T
     images = []
     scale = None
@@ -34,10 +44,10 @@ def prepare_data(dataloader):
     x, y = 0, 0
     for path in list(ims):
         im = Image.open(path)
-        modes = [Image.BICUBIC,
-                 Image.BILINEAR]
+        modes = [Image.Resampling.BICUBIC,
+                 Image.Resampling.BILINEAR]
         if scale < 1:
-            modes.append(Image.LANCZOS)
+            modes.append(Image.Resampling.LANCZOS)
         m = modes[int(len(modes)*np.random.random())]
         im = im.resize((int(width*scale), int(height*scale)), m)
         try:
@@ -69,7 +79,18 @@ def prepare_data(dataloader):
     return images, labels
 
 
-def val(val, model, num_samples=400, device='cuda'):
+def val(val: Im2LatexDataset, model: ResNetV2, num_samples=400, device='cuda') -> float:
+    """Evaluate the model on a dataset
+
+    Args:
+        val (Im2LatexDataset): Validation dataset
+        model (ResNetV2): Model to evaluate
+        num_samples (int, optional): Number of samples to evaluate on. Defaults to 400.
+        device (str, optional): Torch device. Defaults to 'cuda'.
+
+    Returns:
+        float: Accuracy
+    """
     model.eval()
     c, t = 0, 0
     iter(val)
@@ -86,6 +107,12 @@ def val(val, model, num_samples=400, device='cuda'):
 
 
 def main(args):
+    """Train a image resizer model.
+
+    Args:
+        args (Munch): Object with properties `data`, `batchsize`, `max_dimensions`, 
+        `valdata`, `channels`, `device`, `resume`, `lr`, `num_epochs`, `valbatches`, `sample_freq`, `out`
+    """
     # data
     dataloader = Im2LatexDataset().load(args.data)
     dataloader.update(batchsize=args.batchsize, test=False, max_dimensions=args.max_dimensions, keep_smaller_batches=True, device=args.device)

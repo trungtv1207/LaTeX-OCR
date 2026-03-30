@@ -49,11 +49,13 @@ def seed_everything(seed: int):
     torch.backends.cudnn.benchmark = True
 
 
-def parse_args(args, **kwargs):
+def parse_args(args, **kwargs) -> Munch:
     args = Munch({'epoch': 0}, **args)
     kwargs = Munch({'no_cuda': False, 'debug': False}, **kwargs)
+    args.update(kwargs)
     args.wandb = not kwargs.debug and not args.debug
-    args.device = 'cuda' if torch.cuda.is_available() and not kwargs.no_cuda else 'cpu'
+    args.device = get_device(args, kwargs.no_cuda)
+    args.encoder_structure = args.get('encoder_structure', 'hybrid')
     args.max_dimensions = [args.max_width, args.max_height]
     args.min_dimensions = [args.get('min_width', 32), args.get('min_height', 32)]
     if 'decoder_args' not in args or args.decoder_args is None:
@@ -61,14 +63,42 @@ def parse_args(args, **kwargs):
     return args
 
 
-def token2str(tokens, tokenizer):
+def get_device(args, no_cuda=False):
+    device = 'cpu'
+    available_gpus = torch.cuda.device_count()
+    args.gpu_devices = args.gpu_devices if args.get('gpu_devices', False) else list(range(available_gpus))
+    if available_gpus > 0 and not no_cuda:
+        device = 'cuda:%d' % args.gpu_devices[0] if args.gpu_devices else 0
+        assert available_gpus >= len(args.gpu_devices), "Available %d gpu, but specified gpu %s." % (available_gpus, ','.join(map(str, args.gpu_devices)))
+        assert max(args.gpu_devices) < available_gpus, "legal gpu_devices should in [%s], received [%s]" % (','.join(map(str, range(available_gpus))), ','.join(map(str, args.gpu_devices)))
+    return device
+
+
+def gpu_memory_check(model, args):
+    # check if largest batch can be handled by system
+    try:
+        batchsize = args.batchsize if args.get('micro_batchsize', -1) == -1 else args.micro_batchsize
+        for _ in range(5):
+            im = torch.empty(batchsize, args.channels, args.max_height, args.min_height, device=args.device).float()
+            seq = torch.randint(0, args.num_tokens, (batchsize, args.max_seq_len), device=args.device).long()
+            loss = model.data_parallel(im, device_ids=args.gpu_devices, tgt_seq=seq)
+            loss.sum().backward()
+    except RuntimeError:
+        raise RuntimeError("The system cannot handle a batch size of %i for the maximum image size (%i, %i). Try to use a smaller micro batchsize." % (batchsize, args.max_height, args.max_width))
+    model.zero_grad()
+    with torch.cuda.device(args.device):
+        torch.cuda.empty_cache()
+    del im, seq
+
+
+def token2str(tokens, tokenizer) -> list:
     if len(tokens.shape) == 1:
         tokens = tokens[None, :]
     dec = [tokenizer.decode(tok) for tok in tokens]
     return [''.join(detok.split(' ')).replace('Ġ', ' ').replace('[EOS]', '').replace('[BOS]', '').replace('[PAD]', '').strip() for detok in dec]
 
 
-def pad(img: Image, divable=32):
+def pad(img: Image, divable: int = 32) -> Image:
     """Pad an Image to the next full divisible value of `divable`. Also normalizes the image and invert if needed.
 
     Args:

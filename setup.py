@@ -5,11 +5,33 @@ import setuptools
 # read the contents of your README file
 from pathlib import Path
 this_directory = Path(__file__).parent
-long_description = (this_directory / 'README.md').read_text()
+long_description = (this_directory / 'README.md').read_text(encoding='utf-8')
+
+gui = [
+    'PyQt6',
+    'PyQt6-WebEngine',
+    'pyside6',
+    'pynput',
+    'screeninfo',
+    'latex2sympy2',
+]
+api = [
+    'streamlit>=1.8.1',
+    'fastapi>=0.75.2',
+    'uvicorn[standard]',
+    'python-multipart',
+    'st_img_pastebutton>=0.0.3',
+]
+train = [
+    'python-Levenshtein>=0.12.2',
+    'torchtext>=0.6.0',
+    'imagesize>=1.2.0',
+]
+highlight = ['pygments']
 
 setuptools.setup(
     name='pix2tex',
-    version='0.0.14',
+    version='0.1.4',
     description='pix2tex: Using a ViT to convert images of equations into LaTeX code.',
     long_description=long_description,
     long_description_content_type='text/markdown',
@@ -39,32 +61,28 @@ setuptools.setup(
         'einops>=0.3.0',
         'x_transformers==0.15.0',
         'transformers>=4.18.0',
-        'tokenizers==0.12.1',
+        'tokenizers>=0.13.0',
         'numpy>=1.19.5',
         'Pillow>=9.1.0',
         'PyYAML>=5.4.1',
         'pandas>=1.0.0',
-        'timm',
-        'chardet>=3.0.4',
-        'python-Levenshtein>=0.12.2',
-        'torchtext>=0.6.0',
-        'albumentations>=0.5.2',
-        'imagesize>=1.2.0',
+        'timm==0.5.4',
+        'albumentations>=0.5.2,<=1.4.24',
+        'pyreadline3>=3.4.1; platform_system=="Windows"',
     ],
     extras_require={
-        'gui':  [
-            'PyQt5',
-            'PyQtWebEngine',
-            'pynput',
-            'screeninfo',
-        ]
+        'all': gui+api+train+highlight,
+        'gui': gui,
+        'api': api,
+        'train': train,
+        'highlight': highlight,
     },
     entry_points={
         'console_scripts': [
-            'pix2tex_gui = pix2tex.gui:main',
-            'pix2tex_cli = pix2tex.cli:main',
-            'latexocr = pix2tex.gui:main',
-            'pix2tex = pix2tex.cli:main',
+            'pix2tex_gui = pix2tex.__main__:main',
+            'pix2tex_cli = pix2tex.__main__:main',
+            'latexocr = pix2tex.__main__:main',
+            'pix2tex = pix2tex.__main__:main',
         ],
     },
     classifiers=[
